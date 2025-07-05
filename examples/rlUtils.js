@@ -13,30 +13,46 @@ function loadOrtScript() {
       return;
     }
 
-    // Create a script element to load ONNX Runtime
-    const script = document.createElement('script');
-    script.src = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.15.1/dist/ort.min.js';
-    script.async = true;
-
-    // Set up load event
-    script.onload = () => {
-      if (window.ort) {
-        ort = window.ort;
-        console.log('ONNX Runtime loaded successfully via script tag');
-        resolve(true);
-      } else {
-        console.error('Failed to load ONNX Runtime: window.ort not defined after script load');
-        reject(new Error('ONNX Runtime not available after script load'));
+    // Try to load from local lib directory first, then fallback to CDN
+    const sources = [
+      './lib/ort.min.js',  // Local copy
+      'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.15.1/dist/ort.min.js'  // CDN fallback
+    ];
+    
+    let currentIndex = 0;
+    
+    function tryNextSource() {
+      if (currentIndex >= sources.length) {
+        reject(new Error('All ONNX Runtime sources failed to load'));
+        return;
       }
-    };
+      
+      const script = document.createElement('script');
+      script.src = sources[currentIndex];
+      script.async = true;
 
-    // Set up error event
-    script.onerror = () => {
-      reject(new Error('Failed to load ONNX Runtime script'));
-    };
+      script.onload = () => {
+        if (window.ort) {
+          ort = window.ort;
+          console.log(`ONNX Runtime loaded successfully from: ${sources[currentIndex]}`);
+          resolve(true);
+        } else {
+          console.warn(`ONNX Runtime script loaded but window.ort not defined from: ${sources[currentIndex]}`);
+          currentIndex++;
+          tryNextSource();
+        }
+      };
 
-    // Add the script to the document
-    document.head.appendChild(script);
+      script.onerror = () => {
+        console.warn(`Failed to load ONNX Runtime from: ${sources[currentIndex]}`);
+        currentIndex++;
+        tryNextSource();
+      };
+
+      document.head.appendChild(script);
+    }
+    
+    tryNextSource();
   });
 }
 
@@ -168,6 +184,12 @@ export class RLController {
       this.log(`State vector sizes: qpos=${qpos.length}, qvel=${qvel.length}, ` +
         `actuator_length=${actuator_length.length}, actuator_velocity=${actuator_velocity.length}, ` +
         `actuator_force=${actuator_force.length}`);
+      
+      // Log model structure for debugging
+      if (model.nq !== undefined) this.log(`Model nq (generalized coords): ${model.nq}`);
+      if (model.nv !== undefined) this.log(`Model nv (degrees of freedom): ${model.nv}`);
+      if (model.nu !== undefined) this.log(`Model nu (actuators): ${model.nu}`);
+      if (model.nbody !== undefined) this.log(`Model nbody (bodies): ${model.nbody}`);
 
       // Create observation arrays for different components
       const nu = model.nu || 0;
@@ -254,38 +276,56 @@ export class RLController {
       // We need to adapt our observation to match the expected size
 
       // SOLUTION: Create a processed observation matching the expected size
-      // Based on the error message, we need to output 210 elements
-
-      // Method 1: Select the most important elements (first approach)
+      // Based on analysis, the model expects exactly 210 dimensions
+      // This is likely qpos (105) + qvel (105) for the bimanual model
+      
       const expectedSize = 210;
       const processedObs = new Float32Array(expectedSize);
-
-      // Select the most important elements: 
-      // - First all joint positions and velocities
-      const jointStateSize = Math.min(qpos.length + qvel.length, expectedSize);
-      for (let i = 0; i < jointStateSize && i < expectedSize; i++) {
-        processedObs[i] = i < qpos.length ? qpos[i] : qvel[i - qpos.length];
+      
+      // Method: Use exactly qpos + qvel, which should total 210 for bimanual arms
+      let offset = 0;
+      
+      // Copy qpos data
+      const qposSize = Math.min(qpos.length, expectedSize - offset);
+      for (let i = 0; i < qposSize; i++) {
+        processedObs[offset + i] = qpos[i];
       }
-
-      // - Then add important actuator states if there's space
-      let processedOffset = jointStateSize;
-      const actuatorStateSize = Math.min(actuator_pos_data.length, expectedSize - processedOffset);
-      for (let i = 0; i < actuatorStateSize && processedOffset < expectedSize; i++) {
-        processedObs[processedOffset++] = actuator_pos_data[i];
+      offset += qposSize;
+      
+      // Copy qvel data
+      const qvelSize = Math.min(qvel.length, expectedSize - offset);
+      for (let i = 0; i < qvelSize; i++) {
+        processedObs[offset + i] = qvel[i];
       }
-
-      // - Finally, add body positions if there's still space
-      const bodyPosSize = Math.min(body_pos.length, expectedSize - processedOffset);
-      for (let i = 0; i < bodyPosSize && processedOffset < expectedSize; i++) {
-        processedObs[processedOffset++] = body_pos[i];
+      offset += qvelSize;
+      
+      // If we still have space and the total doesn't match, add some actuator information
+      if (offset < expectedSize) {
+        const remainingSpace = expectedSize - offset;
+        this.log(`Filling remaining ${remainingSpace} dimensions with actuator data`);
+        
+        // Add actuator positions first
+        const actuatorDataSize = Math.min(actuator_pos_data.length, remainingSpace);
+        for (let i = 0; i < actuatorDataSize; i++) {
+          processedObs[offset + i] = actuator_pos_data[i];
+        }
+        offset += actuatorDataSize;
       }
-
+      
       // Fill any remaining elements with zeros
-      for (let i = processedOffset; i < expectedSize; i++) {
+      for (let i = offset; i < expectedSize; i++) {
         processedObs[i] = 0;
       }
-
-      console.log(`Created processed observation vector with ${processedObs.length} elements (expected ${expectedSize})`);
+      
+      console.log(`Created processed observation: qpos=${qposSize}, qvel=${qvelSize}, actuator=${Math.min(actuator_pos_data.length, expectedSize - qposSize - qvelSize)}, total=${processedObs.length}`);
+      
+      // Log first few and last few values for debugging
+      if (this.debug) {
+        const sampleSize = 5;
+        const firstVals = Array.from(processedObs.slice(0, sampleSize)).map(v => v.toFixed(3));
+        const lastVals = Array.from(processedObs.slice(-sampleSize)).map(v => v.toFixed(3));
+        this.log(`Obs sample - first: [${firstVals.join(', ')}], last: [${lastVals.join(', ')}]`);
+      }
 
       // Store both the full and processed observations for debugging
       this.fullObservation = fullObsData;
@@ -367,7 +407,7 @@ export class RLController {
     try {
       this.log(`Running inference with observation size: ${observation.length}`);
 
-      // If we can get model input shape, validate observation size
+      // Validate observation size matches expected model input
       let requiredObsSize = 210; // Default based on error message
       let inputShape = null;
 
@@ -387,24 +427,24 @@ export class RLController {
         }
       }
 
-      // Ensure observation has correct size
+      // Strict size validation
       if (observation.length !== requiredObsSize) {
-        this.log(`Observation size mismatch: got ${observation.length}, need ${requiredObsSize}`);
-
-        // Resize observation if needed
+        console.error(`Critical observation size mismatch: got ${observation.length}, need ${requiredObsSize}`);
+        
+        // Create a properly sized observation
         const resizedObs = new Float32Array(requiredObsSize);
-
+        
         // Copy as much data as possible
         const copyLength = Math.min(observation.length, requiredObsSize);
         for (let i = 0; i < copyLength; i++) {
           resizedObs[i] = observation[i];
         }
-
+        
         // Fill remaining with zeros if observation is too short
         for (let i = copyLength; i < requiredObsSize; i++) {
           resizedObs[i] = 0;
         }
-
+        
         observation = resizedObs;
         this.log(`Resized observation to ${observation.length} elements`);
       }
