@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>RL Integration Test</title>
+    <script>
+    // Simple test to verify RL functionality
+    window.addEventListener('load', async () => {
+        console.log('Starting RL integration test...');
+        
+        // Wait a bit for everything to load
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        
+        if (window.demo && window.demo.rlController) {
+            console.log('Demo and RL controller found');
+            
+            // Enable RL control
+            window.demo.params.rlControl = true;
+            console.log('RL control enabled');
+            
+            try {
+                // Load model
+                console.log('Loading model...');
+                const modelLoaded = await window.demo.rlController.loadModel('./examples/models/baseline.onnx');
+                console.log('Model load result:', modelLoaded);
+                
+                if (modelLoaded) {
+                    // Get diagnostics
+                    const diagnostics = window.demo.rlController.getModelDiagnostics();
+                    console.log('Model diagnostics:', diagnostics);
+                    
+                    // Test observation generation
+                    const observation = window.demo.rlController.getObservation(window.demo.simulation, window.demo.model);
+                    console.log('Generated observation:', observation.length, 'elements');
+                    console.log('Observation range:', Math.min(...observation), 'to', Math.max(...observation));
+                    
+                    // Test inference
+                    const action = await window.demo.rlController.runInference(observation);
+                    if (action) {
+                        console.log('Generated action:', action.length, 'elements');
+                        console.log('Action range:', Math.min(...action), 'to', Math.max(...action));
+                        
+                        // Apply action
+                        window.demo.rlController.applyAction(window.demo.simulation, action);
+                        console.log('Action applied successfully');
+                        
+                        document.body.innerHTML += '<h2>RL Integration Test PASSED!</h2><ul>' +
+                            '<li>Model loaded: ' + modelLoaded + '</li>' +
+                            '<li>Observation size: ' + observation.length + '</li>' +
+                            '<li>Action size: ' + action.length + '</li>' +
+                            '<li>Observation range: [' + Math.min(...observation).toFixed(3) + ', ' + Math.max(...observation).toFixed(3) + ']</li>' +
+                            '<li>Action range: [' + Math.min(...action).toFixed(3) + ', ' + Math.max(...action).toFixed(3) + ']</li>' +
+                            '</ul>';
+                    } else {
+                        document.body.innerHTML += '<h2>RL Integration Test FAILED: No action generated</h2>';
+                    }
+                } else {
+                    document.body.innerHTML += '<h2>RL Integration Test FAILED: Model not loaded</h2>';
+                }
+            } catch (error) {
+                console.error('RL test error:', error);
+                document.body.innerHTML += '<h2>RL Integration Test ERROR: ' + error.message + '</h2>';
+            }
+        } else {
+            console.log('Demo or RL controller not found');
+            document.body.innerHTML += '<h2>RL Integration Test FAILED: Demo not found</h2>';
+        }
+    });
+    </script>
+</head>
+<body>
+    <h1>RL Integration Test</h1>
+    <p>Testing RL functionality... Check console for details.</p>
+    <iframe src="http://localhost:8000" width="800" height="600"></iframe>
+</body>
+</html>
